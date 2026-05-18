@@ -1,0 +1,101 @@
+require 'java'
+require 'base64'
+ 
+def main(orchAttr, inputMap)
+ 
+  returnMap = java.util.HashMap.new
+  returnMap["base64PDF"] = ""
+  returnMap["status"]    = ""
+  returnMap["message"]   = ""
+ 
+  begin
+    # ── 1. Inputs da orquestração ────────────────────────────────────────
+    filial    = inputMap["filial"].to_s.strip
+    noLote    = inputMap["noLote"].to_s.strip
+    itemCurto = inputMap["itemCurto"].to_s.strip
+    xmlVal    = inputMap["xmlCredenciais"].to_s.strip
+ 
+    # ── 2. Valida inputs obrigatórios ────────────────────────────────────
+    missing = []
+    missing << "filial"          if filial.empty?
+    missing << "noLote"          if noLote.empty?
+    missing << "itemCurto"       if itemCurto.empty?
+    missing << "xmlCredenciais"  if xmlVal.empty?
+ 
+    unless missing.empty?
+      returnMap["status"]  = "ERROR"
+      returnMap["message"] = "Inputs obrigatorios ausentes: " + missing.join(", ")
+      return returnMap
+    end
+ 
+    # ── 3. Parse do XML no formato <biofy> ───────────────────────────────
+    username    = xmlVal[/<username>(.*?)<\/username>/,       1].to_s.strip
+    password    = xmlVal[/<password>(.*?)<\/password>/,       1].to_s.strip
+    environment = xmlVal[/<environment>(.*?)<\/environment>/, 1].to_s.strip
+    aisUrl      = xmlVal[/<aisUrl>(.*?)<\/aisUrl>/,           1].to_s.strip
+ 
+    if username.empty? || password.empty? || environment.empty? || aisUrl.empty?
+      returnMap["status"]  = "ERROR"
+      returnMap["message"] = "XML incompleto. Verifique: username, password, environment, aisUrl"
+      return returnMap
+    end
+ 
+    # ── 4. Monta o body do download ──────────────────────────────────────
+    body = '{"username":"'   + username    + '",' +
+           '"password":"'    + password    + '",' +
+           '"environment":"' + environment + '",' +
+           '"role":"*ALL",'                       +
+           '"moStructure":"GT4108",'              +
+           '"moKey":["' + filial + '","' + noLote + '","' + itemCurto + '"],' +
+           '"formName":"W4108A",'                 +
+           '"version":"ZJDE0001",'                +
+           '"sequence":1}'
+ 
+    # ── 5. Chama o endpoint de download ──────────────────────────────────
+    client = org.apache.http.impl.client.HttpClients.custom()
+               .disableContentCompression()
+               .build()
+ 
+    post = org.apache.http.client.methods.HttpPost.new(aisUrl + "/jderest/v2/file/download")
+    post.setHeader("Content-Type",    "application/json")
+    post.setHeader("Accept-Encoding", "identity")
+    post.setEntity(org.apache.http.entity.StringEntity.new(body, "UTF-8"))
+ 
+    response   = client.execute(post)
+    statusCode = response.getStatusLine().getStatusCode()
+    bytes      = org.apache.http.util.EntityUtils.toByteArray(response.getEntity())
+ 
+    # ── 6. Valida a resposta ──────────────────────────────────────────────
+    if statusCode != 200
+      returnMap["status"]  = "ERROR"
+      returnMap["message"] = "AIS retornou HTTP " + statusCode.to_s + ": " + String.from_java_bytes(bytes)[0, 300]
+      return returnMap
+    end
+ 
+    responseStr = String.from_java_bytes(bytes)
+ 
+    if responseStr.strip.start_with?("{") && responseStr.include?("ERROR")
+      returnMap["status"]  = "ERROR"
+      returnMap["message"] = "AIS retornou erro: " + responseStr[0, 300]
+      return returnMap
+    end
+ 
+    unless responseStr.start_with?("%PDF")
+      returnMap["status"]  = "ERROR"
+      returnMap["message"] = "Resposta nao e um PDF valido. Recebido: " + responseStr[0, 100]
+      return returnMap
+    end
+ 
+    # ── 7. Converte para Base64 apenas se tudo OK ─────────────────────────
+    returnMap["base64PDF"] = Base64.strict_encode64(String.from_java_bytes(bytes))
+    returnMap["status"]    = "SUCCESS"
+    returnMap["message"]   = "PDF convertido com sucesso"
+ 
+  rescue => e
+    returnMap["status"]  = "ERROR"
+    returnMap["message"] = "Excecao: " + e.message
+  end
+ 
+  returnMap
+ 
+end
